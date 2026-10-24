@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Video Upscaler</title>
+<link rel="icon" href="video-upscaler-icon.png">
+<link rel="apple-touch-icon" sizes="180x180" href="video-upscaler-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Upscaler">
+<style>
+  :root{
+    --bg:#f5f5f7; --card:#fff; --text:#1d1d1f; --muted:#6e6e73; --line:#d2d2d7;
+    --accent:#0071e3; --accent-text:#fff; --danger:#d70015;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#000; --card:#1c1c1e; --text:#f5f5f7; --muted:#98989d; --line:#38383a; --accent:#0a84ff; --danger:#ff453a; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:max(16px,env(safe-area-inset-top)) 16px max(24px,env(safe-area-inset-bottom))}
+  main{max-width:560px;margin:0 auto}
+  h1{font-size:24px;margin:8px 0 4px}
+  p.sub{margin:0 0 16px;color:var(--muted);font-size:14px}
+  .card{background:var(--card);border-radius:14px;padding:16px;margin-bottom:14px}
+  label{display:block;font-size:13px;color:var(--muted);margin:12px 0 6px}
+  label:first-child{margin-top:0}
+  select,input[type=range]{width:100%}
+  select{font:inherit;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--text)}
+  button,.btn{display:block;width:100%;font:inherit;font-weight:600;padding:13px;border-radius:12px;border:0;background:var(--accent);color:var(--accent-text);text-align:center;text-decoration:none;cursor:pointer}
+  button.secondary{background:transparent;color:var(--accent);border:1px solid var(--line)}
+  button:disabled{opacity:.45;cursor:default}
+  .row{display:flex;gap:10px}
+  .row>*{flex:1}
+  .drop{border:2px dashed var(--line);border-radius:12px;padding:22px 12px;text-align:center;color:var(--muted);cursor:pointer}
+  .drop strong{color:var(--text);display:block;margin-bottom:2px}
+  video{width:100%;border-radius:10px;background:#000;display:block}
+  .info{font-size:13px;color:var(--muted);margin-top:8px}
+  .bar{height:8px;border-radius:4px;background:var(--line);overflow:hidden;margin:10px 0 4px}
+  .bar>div{height:100%;width:0;background:var(--accent)}
+  .err{color:var(--danger);font-size:14px;margin-top:8px}
+  canvas#gl{position:absolute;left:-99999px}
+  [hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+  <h1>Video Upscaler</h1>
+  <p class="sub">Enlarge a video to a higher resolution, right in your browser. Nothing is uploaded.</p>
+
+  <div class="card">
+    <input id="file" type="file" accept="video/*" hidden>
+    <div class="drop" id="drop" role="button" tabindex="0">
+      <strong id="dropTitle">Choose a video</strong>
+      <span id="dropSub">Tap to select, or drop a file here</span>
+    </div>
+    <div id="srcInfo" class="info" hidden></div>
+  </div>
+
+  <div class="card" id="opts" hidden>
+    <label for="res">Output resolution</label>
+    <select id="res">
+      <option value="720">720p (HD)</option>
+      <option value="1080" selected>1080p (Full HD)</option>
+      <option value="1440">1440p (2K)</option>
+      <option value="2160">2160p (4K)</option>
+    </select>
+
+    <label for="sharp">Sharpening: <span id="sharpVal">0.5</span></label>
+    <input id="sharp" type="range" min="0" max="1.5" step="0.1" value="0.5">
+
+    <label for="qual">Quality (file size)</label>
+    <select id="qual">
+      <option value="0.06">Small file</option>
+      <option value="0.10" selected>Balanced</option>
+      <option value="0.16">High quality</option>
+    </select>
+
+    <div id="outInfo" class="info"></div>
+    <div style="height:12px"></div>
+    <button id="go">Upscale video</button>
+    <div id="prog" hidden>
+      <div class="bar"><div id="barFill"></div></div>
+      <div class="info" id="progText">Working…</div>
+      <div style="height:8px"></div>
+      <button class="secondary" id="cancel">Cancel</button>
+    </div>
+    <div class="err" id="err" hidden></div>
+  </div>
+
+  <div class="card" id="result" hidden>
+    <video id="outVideo" controls playsinline></video>
+    <div class="info" id="outMeta"></div>
+    <div style="height:12px"></div>
+    <div class="row">
+      <a class="btn" id="dl" download>Download</a>
+      <button class="secondary" id="share" hidden>Share</button>
+    </div>
+  </div>
+
+  <p class="info">The video is re-encoded while it plays, so it takes about as long as the clip itself. Keep this tab open and in front until it finishes. Upscaling smooths and sharpens, but can't add real detail that wasn't there.</p>
+</main>
+
+<video id="src" playsinline preload="auto" hidden></video>
+<canvas id="gl"></canvas>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const fileIn = $('file'), drop = $('drop'), srcV = $('src'), glc = $('gl');
+  let srcUrl = null, outUrl = null, outBlob = null, srcName = 'video';
+  let running = false, cancelled = false, actx = null, audioNode = null;
+
+  // ---------- file selection ----------
+  drop.addEventListener('click', () => fileIn.click());
+  drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') fileIn.click(); });
+  ['dragover','dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); }));
+  drop.addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer.files[0]) load(e.dataTransfer.files[0]); });
+  fileIn.addEventListener('change', () => { if (fileIn.files[0]) load(fileIn.files[0]); });
+
+  function load(f) {
+    if (running) return;
+    if (srcUrl) URL.revokeObjectURL(srcUrl);
+    srcUrl = URL.createObjectURL(f);
+    srcName = f.name.replace(/\.[^.]+$/, '') || 'video';
+    srcV.src = srcUrl;
+    $('result').hidden = true; $('err').hidden = true;
+    $('dropTitle').textContent = f.name;
+    $('dropSub').textContent = 'Tap to choose a different video';
+    srcV.onloadedmetadata = () => {
+      $('srcInfo').hidden = false;
+      $('srcInfo').textContent = `${srcV.videoWidth}×${srcV.videoHeight} · ${fmtTime(srcV.duration)} · ${(f.size/1048576).toFixed(1)} MB`;
+      $('opts').hidden = false;
+      // default: next step up from the source
+      const h = srcV.videoHeight, steps = [720,1080,1440,2160];
+      $('res').value = String(steps.find(s => s > h) || 2160);
+      updateOut();
+    };
+    srcV.onerror = () => showErr("This browser can't read that video format.");
+  }
+
+  function outSize() {
+    const th = +$('res').value, ar = srcV.videoWidth / srcV.videoHeight;
+    let w = Math.round(th * ar), h = th;
+    if (w % 2) w++;
+    return { w, h };
+  }
+  function updateOut() {
+    if (!srcV.videoWidth) return;
+    const { w, h } = outSize();
+    const scale = (h / srcV.videoHeight).toFixed(2);
+    $('outInfo').textContent = `Output: ${w}×${h} (${scale}× the original height)` +
+      (h <= srcV.videoHeight ? ' — not larger than the source' : '');
+  }
+  $('res').addEventListener('change', updateOut);
+  $('sharp').addEventListener('input', () => $('sharpVal').textContent = $('sharp').value);
+
+  // ---------- WebGL scaler ----------
+  let gl, prog, tex, locs;
+  function initGL() {
+    gl = glc.getContext('webgl', { preserveDrawingBuffer: true, antialias: false, alpha: false });
+    if (!gl) throw new Error('WebGL is not available in this browser.');
+    const vs = `attribute vec2 p;varying vec2 uv;void main(){uv=vec2(p.x*.5+.5,.5-p.y*.5);gl_Position=vec4(p,0.,1.);}`;
+    const fs = `precision highp float;varying vec2 uv;uniform sampler2D t;uniform vec2 px;uniform float amt;
+      void main(){
+        vec4 c=texture2D(t,uv);
+        vec4 n=texture2D(t,uv+vec2(0.,-px.y))+texture2D(t,uv+vec2(0.,px.y))+texture2D(t,uv+vec2(-px.x,0.))+texture2D(t,uv+vec2(px.x,0.));
+        gl_FragColor=vec4(clamp(c.rgb+amt*(c.rgb-n.rgb*.25),0.,1.),1.);
+      }`;
+    const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+    prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, vs));
+    gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(prog); gl.useProgram(prog);
+    const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+    const a = gl.getAttribLocation(prog, 'p'); gl.enableVertexAttribArray(a); gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0);
+    tex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    locs = { px: gl.getUniformLocation(prog, 'px'), amt: gl.getUniformLocation(prog, 'amt') };
+  }
+  function drawFrame(amount) {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, srcV);
+    gl.uniform2f(locs.px, 1 / srcV.videoWidth, 1 / srcV.videoHeight);
+    gl.uniform1f(locs.amt, amount);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  // ---------- upscale ----------
+  function pickMime() {
+    const list = ['video/mp4;codecs=avc1.640033', 'video/mp4;codecs=avc1', 'video/mp4',
+                  'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+    return list.find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
+  }
+
+  $('go').addEventListener('click', async () => {
+    if (running) return;
+    $('err').hidden = true; $('result').hidden = true;
+    if (!window.MediaRecorder) return showErr('This browser does not support video recording (MediaRecorder).');
+    try {
+      running = true; cancelled = false;
+      setBusy(true);
+      const { w, h } = outSize();
+      glc.width = w; glc.height = h;
+      if (!gl) initGL();
+      gl.viewport(0, 0, w, h);
+
+      const amount = +$('sharp').value;
+      const fps = 30;
+      const vstream = glc.captureStream(fps);
+
+      // audio
+      let dest = null;
+      try {
+        // an element can only be wired to an AudioContext once, so keep them for later runs
+        if (!actx) {
+          actx = new (window.AudioContext || window.webkitAudioContext)();
+          audioNode = actx.createMediaElementSource(srcV);
+        }
+        dest = actx.createMediaStreamDestination();
+        audioNode.connect(dest);
+        dest.stream.getAudioTracks().forEach(t => vstream.addTrack(t));
+        if (actx.state === 'suspended') await actx.resume();
+      } catch (e) { /* no audio track available — continue silently */ }
+
+      const mime = pickMime();
+      const bitrate = Math.round(w * h * fps * parseFloat($('qual').value));
+      const rec = new MediaRecorder(vstream, mime ? { mimeType: mime, videoBitsPerSecond: bitrate } : { videoBitsPerSecond: bitrate });
+      const chunks = [];
+      rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+      const stopped = new Promise(r => rec.onstop = r);
+
+      srcV.currentTime = 0;
+      await new Promise(r => { if (srcV.readyState >= 2 && srcV.currentTime === 0) r(); else srcV.onseeked = () => r(); });
+      drawFrame(amount);
+      rec.start(1000);
+      await srcV.play();
+
+      const useRVFC = 'requestVideoFrameCallback' in srcV;
+      const tick = () => {
+        if (cancelled || srcV.ended) return;
+        drawFrame(amount);
+        const pct = Math.min(100, (srcV.currentTime / srcV.duration) * 100);
+        $('barFill').style.width = pct + '%';
+        $('progText').textContent = `${pct.toFixed(0)}% · ${fmtTime(srcV.currentTime)} of ${fmtTime(srcV.duration)}`;
+        useRVFC ? srcV.requestVideoFrameCallback(tick) : requestAnimationFrame(tick);
+      };
+      useRVFC ? srcV.requestVideoFrameCallback(tick) : requestAnimationFrame(tick);
+
+      await new Promise(r => { srcV.onended = r; cancelPoll(r); });
+      srcV.pause();
+      drawFrame(amount);
+      await new Promise(r => setTimeout(r, 200));
+      if (rec.state !== 'inactive') rec.stop();
+      await stopped;
+      vstream.getTracks().forEach(t => t.stop());
+      if (dest) { try { audioNode.disconnect(dest); } catch (e) {} }
+
+      if (cancelled) { finish(); return; }
+
+      const type = (rec.mimeType || mime || 'video/webm').split(';')[0];
+      const ext = type.includes('mp4') ? 'mp4' : 'webm';
+      outBlob = new Blob(chunks, { type });
+      if (outUrl) URL.revokeObjectURL(outUrl);
+      outUrl = URL.createObjectURL(outBlob);
+      const name = `${srcName}-${h}p.${ext}`;
+      $('outVideo').src = outUrl;
+      $('dl').href = outUrl; $('dl').download = name;
+      $('outMeta').textContent = `${w}×${h} · ${(outBlob.size/1048576).toFixed(1)} MB · ${ext.toUpperCase()}`;
+      $('result').hidden = false;
+      const f = new File([outBlob], name, { type });
+      if (navigator.canShare && navigator.canShare({ files: [f] })) {
+        $('share').hidden = false;
+        $('share').onclick = () => navigator.share({ files: [f] }).catch(() => {});
+      }
+      $('result').scrollIntoView({ behavior: 'smooth' });
+      finish();
+    } catch (e) {
+      showErr(e.message || String(e));
+      finish();
+    }
+  });
+
+  // poll so Cancel can break the wait on 'ended'
+  function cancelPoll(resolve) {
+    const iv = setInterval(() => { if (cancelled || !running) { clearInterval(iv); resolve(); } else if (srcV.ended) clearInterval(iv); }, 200);
+  }
+  $('cancel').addEventListener('click', () => { cancelled = true; srcV.pause(); });
+
+  function finish() {
+    running = false; setBusy(false);
+    srcV.pause();
+  }
+  function setBusy(b) {
+    $('go').hidden = b; $('prog').hidden = !b;
+    $('barFill').style.width = '0';
+    $('progText').textContent = 'Starting…';
+    $('res').disabled = $('sharp').disabled = $('qual').disabled = b;
+  }
+  function showErr(m) { $('err').textContent = m; $('err').hidden = false; $('opts').hidden = false; }
+  function fmtTime(s) { s = Math.round(s || 0); return Math.floor(s/60) + ':' + String(s%60).padStart(2, '0'); }
+})();
+</script>
+</body>
+</html>

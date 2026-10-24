@@ -21,12 +21,13 @@ A simple web app that enlarges a video to a higher resolution (720p up to 4K) ri
 
 - The video is re-encoded while it plays, so processing takes about as long as the clip itself. Keep the tab open and in front.
 - Upscaling makes the picture larger and smoother, but it can't add real detail that wasn't in the original.
-- Output is MP4 on Safari and WebM on Chrome and other browsers.
-- Needs a modern browser with WebGL and MediaRecorder support.
+- Output is a standard MP4 (H.264) with a built-in time index, so you can drag the progress bar forward and back. Browsers without WebCodecs fall back to the older recorder (MP4 on Safari, WebM elsewhere), and the length is still written so seeking works.
+- If the device is slow, the app plays the source slower so no frames are skipped; this can make processing take longer than the clip.
+- Needs a modern browser with WebGL support.
 
 ## Files
 
-- `index.html` - the whole app (HTML, CSS and JavaScript in one file)
+- `index.html` - the whole app (HTML, CSS and JavaScript in one file, with the small MIT-licensed mp4-muxer library inlined)
 - `video-upscaler-icon.png` - 180x180 Home Screen icon (add your own)
 
 ## Hosting on GitHub Pages

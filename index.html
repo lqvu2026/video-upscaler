@@ -150,7 +150,13 @@ If you want to offset all timestamps of a track such that the first one is zero,
       $('res').value = String(steps.find(s => s > h) || 2160);
       updateOut();
     };
-    srcV.onerror = () => showErr("This browser can't read that video format.");
+    srcV.onerror = () => {
+      const er = srcV.error, code = er ? ` (error ${er.code}${er.message ? ': ' + er.message : ''})` : '';
+      const was = running;
+      if (was) { cancelled = true; if (onCancel) onCancel(); }
+      showErr((was ? 'The video stopped playing while it was being processed' : "This browser can't read that video") + code +
+        '. Try a shorter clip, or on iPhone set Settings > Camera > Formats > Most Compatible and record again.');
+    };
   }
 
   function outSize() {
@@ -275,7 +281,7 @@ If you want to offset all timestamps of a track such that the first one is zero,
   }
 
   async function decodeAudio() {
-    if (srcFile.size > 600 * 1048576) throw new Fallback('File too large to decode audio in memory');
+    if (srcFile.size > 250 * 1048576) throw new Fallback('File too large to decode audio in memory');
     const AC = window.AudioContext || window.webkitAudioContext;
     const ctx = new AC();
     try { return await ctx.decodeAudioData(await srcFile.arrayBuffer()); }

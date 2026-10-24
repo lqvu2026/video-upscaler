@@ -282,6 +282,12 @@ If you want to offset all timestamps of a track such that the first one is zero,
     finally { try { ctx.close(); } catch (e) {} }
   }
 
+  async function resampleTo(buf, rate) {
+    const oc = new OfflineAudioContext(buf.numberOfChannels, Math.ceil(buf.duration * rate), rate);
+    const s = oc.createBufferSource(); s.buffer = buf; s.connect(oc.destination); s.start();
+    return await oc.startRendering();
+  }
+
   async function runWebCodecs({ w, h, amount, factor }) {
     const fps = 30;
     const bitrate = Math.round(w * h * fps * factor);
@@ -297,19 +303,24 @@ If you want to offset all timestamps of a track such that the first one is zero,
 
     // the sound is decoded up front and encoded separately
     setProgress(0, 'Preparing audio…');
+    // If the browser can't decode the sound up front, don't silently drop it: let the
+    // recorder path take over, which captures the audio while the video plays.
     let abuf = null;
     try { abuf = await decodeAudio(); }
-    catch (e) { if (e instanceof Fallback) throw e; abuf = null; }
+    catch (e) { throw (e instanceof Fallback ? e : new Fallback('Audio could not be decoded: ' + (e && e.message))); }
     if (cancelled) return null;
 
     let acfg = null, ch = 0, sr = 0;
     if (abuf) {
       ch = Math.min(2, abuf.numberOfChannels); sr = abuf.sampleRate;
-      for (const [codec, mux] of [['mp4a.40.2', 'aac'], ['opus', 'opus']]) {
-        const cfg = { codec, sampleRate: sr, numberOfChannels: ch, bitrate: 128000 };
-        try { if ((await AudioEncoder.isConfigSupported(cfg)).supported) { acfg = { cfg, mux }; break; } } catch (e) {}
+      // AAC only: Opus inside an MP4 plays silently in QuickTime, iPhone Photos and many other players
+      for (const sampleRate of [sr, 48000, 44100]) {
+        const cfg = { codec: 'mp4a.40.2', sampleRate, numberOfChannels: ch, bitrate: 128000 };
+        try { if ((await AudioEncoder.isConfigSupported(cfg)).supported) { acfg = { cfg, mux: 'aac' }; break; } } catch (e) {}
       }
-      if (!acfg) throw new Fallback('No audio encoder');
+      if (!acfg) throw new Fallback('No AAC audio encoder');
+      if (acfg.cfg.sampleRate !== sr) abuf = await resampleTo(abuf, acfg.cfg.sampleRate);
+      sr = acfg.cfg.sampleRate;
     }
 
     const target = new Mp4Muxer.ArrayBufferTarget();
@@ -434,7 +445,7 @@ If you want to offset all timestamps of a track such that the first one is zero,
       return {
         blob: new Blob([target.buffer], { type: 'video/mp4' }),
         ext: 'mp4',
-        note: abuf ? '' : 'No audio was carried over (the source may have none)'
+        note: ''
       };
     } catch (e) {
       closeAll(); onCancel = null; srcV.pause();
@@ -458,7 +469,7 @@ If you want to offset all timestamps of a track such that the first one is zero,
     const vstream = glc.captureStream(fps);
 
     // audio
-    let dest = null;
+    let dest = null, gotAudio = false;
     try {
       // an element can only be wired to an AudioContext once, so keep them for later runs
       if (!actx) {
@@ -468,8 +479,9 @@ If you want to offset all timestamps of a track such that the first one is zero,
       dest = actx.createMediaStreamDestination();
       audioNode.connect(dest);
       dest.stream.getAudioTracks().forEach(t => vstream.addTrack(t));
+      gotAudio = vstream.getAudioTracks().length > 0;
       if (actx.state === 'suspended') await actx.resume();
-    } catch (e) { /* no audio track available — continue silently */ }
+    } catch (e) { console.warn('Audio capture failed:', e && e.message); }
 
     const mime = pickMime();
     const bitrate = Math.round(w * h * fps * factor);
@@ -509,7 +521,7 @@ If you want to offset all timestamps of a track such that the first one is zero,
     const ext = type.includes('mp4') ? 'mp4' : 'webm';
     let blob = new Blob(chunks, { type });
     if (ext === 'webm') blob = await fixWebmDuration(blob, srcV.duration);   // so the seek bar works
-    return { blob, ext, note: '' };
+    return { blob, ext, note: gotAudio ? '' : 'Heads-up: no sound was captured. If the original has sound, please tell the developer.' };
   }
 
   // A recorded WebM has no length written in it, which blocks seeking. Add the duration to its header.
